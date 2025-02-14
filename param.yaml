@@ -1,0 +1,5 @@
+template-file-path: index.yaml
+parameters:
+  S3UserEmail: yawsamo23@gmail.com
+  EC2UserEmail: nictech23@gmail.com
+tags: {}
