@@ -1,0 +1,191 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'IAM Resources Automation Lab Template'
+
+Parameters:
+  EC2UserEmail:
+    Type: String
+    Description: Email for EC2 user
+  S3UserEmail:
+    Type: String
+    Description: Email for S3 user
+
+Resources:
+  # One-Time Password in Secrets Manager
+  TemporaryPassword:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: /iam/temp-password
+      GenerateSecretString:
+        PasswordLength: 16
+        RequireEachIncludedType: true
+        ExcludePunctuation: true
+
+  # Store User Emails in Parameter Store
+  EC2UserEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/ec2-user/email
+      Type: String
+      Value: !Ref EC2UserEmail
+
+  S3UserEmailParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /iam/s3-user/email
+      Type: String
+      Value: !Ref S3UserEmail
+
+  # IAM Groups
+  EC2UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: EC2ReadOnlyGroup
+      ManagedPolicyArns: 
+        - arn:aws:iam::aws:policy/AmazonEC2ReadOnlyAccess
+
+  S3UserGroup:
+    Type: AWS::IAM::Group
+    Properties:
+      GroupName: S3ReadOnlyGroup
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+
+  # IAM Users
+  EC2User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: ec2-user-nicholas
+      Groups: 
+        - !Ref EC2UserGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:${TemporaryPassword}}}'
+        PasswordResetRequired: true
+
+  S3User:
+    Type: AWS::IAM::User
+    Properties:
+      UserName: s3-user-nicholas
+      Groups: 
+        - !Ref S3UserGroup
+      LoginProfile:
+        Password: !Sub '{{resolve:secretsmanager:${TemporaryPassword}}}'
+        PasswordResetRequired: true
+
+  # Lambda Function Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: SecretsAndParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - secretsmanager:GetSecretValue
+                  - ssm:GetParameter
+                Resource: 
+                  - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/iam/temp-password-*'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/ec2-user/email'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/s3-user/email'
+
+  # Lambda Function
+  UserCreationNotifier:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          def handler(event, context):
+              # Get the username from the CloudWatch event
+              detail = event['detail']
+              username = detail['requestParameters']['userName']
+              
+              # Initialize AWS clients
+              ssm = boto3.client('ssm')
+              secrets = boto3.client('secretsmanager')
+              
+              # Get user email from Parameter Store
+              try:
+                  email_param = ssm.get_parameter(Name=f'/iam/{username}/email')
+                  email = email_param['Parameter']['Value']
+              except Exception as e:
+                  print(f"Error getting email for user {username}: {str(e)}")
+                  return
+              
+              # Get temporary password from Secrets Manager
+              try:
+                  secret = secrets.get_secret_value(SecretId='/iam/temp-password')
+                  temp_password = secret['SecretString']
+              except Exception as e:
+                  print(f"Error getting temporary password: {str(e)}")
+                  return
+              
+              # Log the information
+              print(f"New user created:")
+              print(f"Username: {username}")
+              print(f"Email: {email}")
+              print(f"Temporary Password: {temp_password}")
+              
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('User creation processed successfully')
+              }
+      Runtime: python3.9
+      Timeout: 30
+      MemorySize: 128
+
+  # EventBridge Rule
+  UserCreationRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: detect-iam-user-creation
+      Description: "Rule to detect IAM user creation"
+      EventPattern:
+        source:
+          - aws.iam
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - iam.amazonaws.com
+          eventName:
+            - CreateUser
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt UserCreationNotifier.Arn
+          Id: "UserCreationLambda"
+
+  # Lambda Permission for EventBridge
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UserCreationNotifier
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt UserCreationRule.Arn
+
+Outputs:
+  TemporaryPasswordSecret:
+    Description: "Secret ARN containing the temporary password"
+    Value: !Ref TemporaryPassword
+  EC2UserArn:
+    Description: "EC2 User ARN"
+    Value: !GetAtt EC2User.Arn
+  S3UserArn:
+    Description: "S3 User ARN"
+    Value: !GetAtt S3User.Arn
