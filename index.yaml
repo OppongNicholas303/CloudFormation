@@ -96,7 +96,7 @@ Resources:
                 Resource: 
                   - !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:/iam/temp-password-*'
                   - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/ec2-user/email'
-                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/s3-user/email'
+                  - !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/iam/s3-user/email' 
 
   # Lambda Function
   UserCreationNotifier:
@@ -178,6 +178,15 @@ Resources:
       FunctionName: !Ref UserCreationNotifier
       Principal: events.amazonaws.com
       SourceArn: !GetAtt UserCreationRule.Arn
+
+  Resources:
+  MyStack:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      Tags:
+        - Key: ForceUpdate
+          Value: !Ref "AWS::Timestamp"
+
 
 Outputs:
   TemporaryPasswordSecret:
